@@ -13,22 +13,23 @@ import signal
 import stat
 
 from fuse import FUSE, FuseOSError, Operations, fuse_get_context
+# from main import get_data
 
-
-from vol_multiple import get_file
-from vol_multiple import borrar_contenido_carpeta
-from vol_multiple import obtain_file_paths
-from vol_multiple import init
-from vol_multiple import set_file
-from vol_multiple import set_random
-from vol_multiple import get_enviroment
-from vol_multiple import get_master_key
-from vol_multiple import get_path_files
-from vol_multiple import gen_attr_data
-from vol_multiple import get_file_open
-from vol_multiple import remove_file_container_filename
-from vol_multiple import remove_file_container_filename_common_enviroment
-from vol_multiple import open_empty_file
+from vol_new import get_file
+from vol_new import borrar_contenido_carpeta
+from vol_new import obtain_file_paths
+from vol_new import init
+from vol_new import set_file
+from vol_new import set_random
+from vol_new import get_enviroment
+from vol_new import get_master_key
+from vol_new import get_path_files
+from vol_new import gen_attr_data
+from vol_new import get_file_open
+from vol_new import remove_file_container_filename
+from vol_new import remove_file_container_filename_common_enviroment
+from vol_new import open_empty_file
+from vol_new import get_number_keys
 
 ROOT = ""
 CONTAINER = ""
@@ -40,7 +41,7 @@ ENVIROMENT = ""
 
 class Passthrough(Operations):
     def __init__(self, root, password, container_file, mount_point):
-        print("init")
+        print("FUSE file system created in: " + str(mount_point))
         self.root = root
         self.password = password
         self.container_file = container_file
@@ -48,6 +49,10 @@ class Passthrough(Operations):
         self.files = []
         self.enviroment = get_enviroment(container_file, password)
         self.master = get_master_key(container_file, password, self.enviroment)
+        if self.enviroment == 0:
+            print("Password not matched")
+            sys.exit(0)
+        print("Enviroment: " + str(self.enviroment))
         borrar_contenido_carpeta(self.root)
 
 
@@ -96,7 +101,7 @@ class Passthrough(Operations):
                 data["st_size"] = lengths[index]
                 data["st_ctime"] = 10000
 
-                # data["st_mode"] = stat.S_IFDIR
+
             except:
                 data["st_nlink"] = 1
                 data["st_mode"] = 33188
@@ -108,8 +113,7 @@ class Passthrough(Operations):
         full_path = self._full_path(path)
         print("readdir")
         dirents = ['.', '..']
-        # if os.path.isdir(full_path):
-        #     dirents.extend(os.listdir(full_path))
+
         entries, lengths = get_path_files(self.container_file, self.master, self.enviroment, self.mount_point)
         entries_new = []
         if (full_path.replace(self.root, "") == "/"):
@@ -133,7 +137,7 @@ class Passthrough(Operations):
         pathname = os.readlink(self._full_path(path))
         print("readlink")
         if pathname.startswith("/"):
-            # Path name is absolute, sanitize it.
+
             return os.path.relpath(pathname, self.root)
         else:
             return pathname
@@ -158,7 +162,7 @@ class Passthrough(Operations):
     def unlink(self, path):
         print("unlink")
         open_empty_file(self.container_file, self.master, self.root + path)
-        file_removed = remove_file_container_filename_common_enviroment(self.container_file, self.master, path[1:], self.enviroment, self.root)
+        file_removed = remove_file_container_filename_common_enviroment(self.container_file, self.master, path[1:], self.enviroment, self.root, self.password)
         return os.unlink(self._full_path(path))
 
     def symlink(self, name, target):
@@ -177,7 +181,7 @@ class Passthrough(Operations):
         print("utimens")
         return os.utime(self._full_path(path), times)
 
-##
+
 
     def open(self, path, flags):
         print("open")
@@ -194,7 +198,7 @@ class Passthrough(Operations):
         uid, gid, pid = fuse_get_context()
         full_path = self._full_path(path)
         fd = os.open(full_path, os.O_WRONLY | os.O_CREAT, mode)
-        # os.chown(full_path,uid,gid) #chown to context uid & gid
+
         return fd
 
     def read(self, path, length, offset, fh):
@@ -221,11 +225,9 @@ class Passthrough(Operations):
     def release(self, path, fh):
         print("release")
         # Rutina para guardar el cambio en el fichero y borrarlo del sistema de archivos
-        file_removed, enviroment_return = remove_file_container_filename(self.container_file, self.master, path[1:], self.enviroment, self.root)
+        file_removed, enviroment_return = remove_file_container_filename(self.container_file, self.master, path[1:], self.enviroment, self.root, self.password)
         archivos_encontrados = obtain_file_paths(self.root)
         for ruta_archivo in archivos_encontrados:
-            print(ruta_archivo.split("/")[-1:][0])
-            print(path[1:])
             if(ruta_archivo.split("/")[-1:][0] == path[1:]):
                 if( enviroment_return == None):
                     set_file(self.container_file, self.master, self.enviroment, ruta_archivo, self.root)
@@ -236,7 +238,6 @@ class Passthrough(Operations):
 
     def fsync(self, path, fdatasync, fh):
         print("fsync")
-
         return self.flush(path, fh)
 
 
@@ -259,7 +260,7 @@ def cleanup():
 
     # Rutina para borrar el directorio root 
     borrar_contenido_carpeta(ROOT)
-    print("Program completed")
+    print("Execution completed")
     
 def signal_handler(signal, frame):
     # Lógica para manejar la señal de interrupción (Ctrl + C)
@@ -384,11 +385,7 @@ def main():
         KEY = key
         global MOUNTPOINT
         MOUNTPOINT = args.mountpoint.strip()
-
-        print("Mountpoint: " + MOUNTPOINT)
-        print("Root: " + ROOT)
-        print("Key: " + KEY.decode("utf8"))
-        print("Container :" + CONTAINER)
+        # Funcion para crear el 
         create_fuse_filesystem(MOUNTPOINT, ROOT, KEY, CONTAINER)
 
         
@@ -421,11 +418,6 @@ def main():
         for i in range(number):
             set_random(args.file.strip(), master, enviroment, "random")
 
-def pruebas():
-    KEY = b"hola"
-    CONTAINER = "./master_prueba.bin"
-    create_fuse_filesystem("/tmp/fuse", "/home/jorge/tf/fuse", KEY, CONTAINER)
-
 
 if __name__ == '__main__':
 
@@ -436,10 +428,3 @@ if __name__ == '__main__':
     signal.signal(signal.SIGINT, signal_handler)
     # Inicio del programa
     main()
-    
-    # file_ = "./master_prueba.bin"
-    # clave = b"hola"
-    # enviroment = 3
-    # master = get_master_key(file_, clave, enviroment)
-    # set_file(file_, master, enviroment, "./entropy.py", "")
-    # pruebas()

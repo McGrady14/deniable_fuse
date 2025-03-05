@@ -1,4 +1,5 @@
 import os
+import sys
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives import hashes
@@ -21,7 +22,7 @@ FIRST_INDEX = 0
 NUMBER_KEYS = 2
 
 # Value for each enviroment
-COMMON_ENVIROMENT_VALUE = NUMBER_KEYS + 1
+COMMON_ENVIROMENT_VALUE = 0
 FIRST_ENVIROMENT_VALUE = 1
 SECOND_ENVIROMENT_VALUE = 2
 
@@ -150,12 +151,10 @@ def random_data(size):
 
 def createfile(path):
     print("Creating file ...")
-    # print(path)
     with open(path, "w+b") as file:
         # Generamos la salt y el nonce
         salt = random_data(SALT_SIZE)
         nonce = random_data(NONCE_SIZE)
-        # print(salt)
         # Se crea el fichero, al inicio en nonce y la salt 
         file.write(nonce)
         file.write(salt)
@@ -180,32 +179,30 @@ def get_salt_nonce(path):
 def init(path):
     # Se crea el fichero 
     createfile(path)
-
     salt, nonce = get_salt_nonce(path)
     master = get_pbkdf(os.urandom(32), salt)
 
+    # Setear el numero de entornos
+    number_enviroments = int(input("Enter the number of environments: "))
+    with open(path, "r+b") as file:
+        enviroments_cipher = str(number_enviroments).zfill(ENVIROMENTS_SIZE).encode("utf-8")
+        enviroments_cipher = encrypt_message_salt_nonce(enviroments_cipher, master, salt, nonce)
+        file.write(enviroments_cipher)
+        file.close()
+
     size_passw = 0 
-    for i in range(NUMBER_KEYS):
-        key = getpass.getpass("Secret key "+ str(i + 1) + ": ")
-        key = key.encode("utf8")
-        key_hashed = hashlib.sha256(key) # Clave hasheada con sha256
-        # key = b'passwd'
-
-        pwm_new = get_pbkdf(key, salt)
-        master_sec = encrypt_message_salt_nonce(master, key, salt, nonce)
-
-        with open(path, "r+b") as file:
-            file.seek(NONCE_SIZE + SALT_SIZE + size_passw)
+    # Pedir una pass por cada entorno
+    with open(path, "r+b") as file:
+        for i in range(number_enviroments):
+            key = getpass.getpass("Secret key "+ str(i + 1) + ": ")
+            key = key.encode("utf8")
+            key_hashed = hashlib.sha256(key) # Clave hasheada con sha256
+            master_sec = encrypt_message_salt_nonce(master, key, salt, nonce)
+            file.seek(NONCE_SIZE + SALT_SIZE + ENVIROMENTS_SIZE + size_passw)
             file.write(key_hashed.digest())
             file.write(master_sec)
-            file.close()
-        # print("Master Key SEC number " + str(i) + " : " + str(binascii.hexlify(master_sec).decode('utf-8')))
-        # with open(path, "r+b") as file:
-            # file.seek(NONCE_SIZE+ SALT_SIZE)
-            # master_rec = file.read(len(master_sec))
-            # file.close()
-
-        size_passw = size_passw + len(key_hashed.digest()) + len(master_sec)
+            size_passw = size_passw + len(key_hashed.digest()) + len(master_sec)
+        file.close()
 
     
     print("File created in ", str(path))
@@ -224,11 +221,7 @@ def master_recovery(path, key):
         data.append(input("key: ").encode("utf8"))
 
     size_passw = 0 
-
-    print(salt)
-    print(nonce)
     for key in data:
-        print(key.decode('utf-8'))
         with open(path, "r+b") as file:
             file.seek(NONCE_SIZE+ SALT_SIZE + size_passw)
             # file.seek(0)
@@ -236,13 +229,7 @@ def master_recovery(path, key):
             file.close()
 
         size_passw = size_passw + 32
-        print(binascii.hexlify(master_rec).decode('utf-8'))
-        # key = get_pbkdf(key, salt)
-        
-        # print(master_rec)
-
         master_rec = decrypt_message(salt, nonce, master_rec, key)
-        print(binascii.hexlify(master_rec).decode('utf-8'))
 
     return master_rec
 
@@ -257,7 +244,6 @@ def master_recovery_(path, key):
         file.close()
 
     master_rec = decrypt_message(salt, nonce, master_rec, key)
-    print(binascii.hexlify(master_rec).decode('utf-8'))
 
     return master_rec
 
@@ -278,7 +264,7 @@ def append_data(data, path):
         file.write(data)
         file.close()
 
-# Metodo para insertar un fichero dentro del fichero contenedor con una clave
+# Metodo para insertar un bloque de datos aleatorios
 def set_random(path, key, enviroment_select, infile):
 
     salt, nonce = get_salt_nonce(path)
@@ -316,7 +302,6 @@ def set_random(path, key, enviroment_select, infile):
 def set_file(path, key, enviroment_select, infile, root_mount):
     with open(infile,"r+b") as f:
         complete_file = f.read()
-        # set_data(path, key, complete_file)
         message = complete_file
     salt, nonce = get_salt_nonce(path)
     if (".swap" != str(infile[-4:])):
@@ -330,7 +315,7 @@ def set_file(path, key, enviroment_select, infile, root_mount):
             for plaintext in plaintexts:
                 ciphertext = encrypt_message_salt_nonce(plaintext, key, salt, nonce)
                 ciphertexts.append(ciphertext)
-            ############ CREAR RUTINA PARA AÑADIR FICHEROS VACIOS HECHA
+
             n_block = 1
             if len(ciphertexts) == 0:
                 # Enviroment
@@ -360,15 +345,7 @@ def set_file(path, key, enviroment_select, infile, root_mount):
                 # Introducimos los datos al final del fichero
                 append_data(block_complete, path)
 
-
-
-
-                # Introducimos data random al fichero
-                # rand_data = randint(MIN_RANDOM_DATA, MID_RANDOM_DATA)
-                # dunce_data(path, rand_data)
-
             else:
-                # El inicio de los bloques siempre es 1 ## TODO hay utilizarlo para el seteo aleatorio y para la acumulación de mensajes, actualmente si se actualiza un mensaje, se empiza con el n_block = 1  y es un error
                 for cipher in ciphertexts:
 
                     if(len(cipher) < DATA_SIZE):
@@ -401,14 +378,6 @@ def set_file(path, key, enviroment_select, infile, root_mount):
                         # Introducimos los datos al final del fichero
                         append_data(block_complete, path)
 
-
-
-
-                        # Introducimos data random al fichero
-                        # rand_data = randint(MIN_RANDOM_DATA, MID_RANDOM_DATA)
-                        # dunce_data(path, rand_data)
-
-
                     else:
 
                         # Enviroment
@@ -438,14 +407,6 @@ def set_file(path, key, enviroment_select, infile, root_mount):
                         # Introducimos los datos al final del fichero
                         append_data(block_complete, path)
 
-
-
-                        # Introducimos data random al fichero
-                        # rand_data = randint(MIN_RANDOM_DATA, MID_RANDOM_DATA)
-                        # dunce_data(path, rand_data)
-
-
-
                     n_block+=1 # Aumento del número de bloque 
 
 
@@ -456,15 +417,16 @@ def get_enviroment(path, key):
         # Fichero completo 
         data = file.read()
         tamaño_bytes = len(data)
-        n_bloques = (tamaño_bytes - NONCE_SIZE - SALT_SIZE - (NUMBER_KEYS * MASTER_KEY_SIZE)) / BLOCK_SIZE
+        total_claves_posibles = int(tamaño_bytes / MASTER_KEY_SIZE)
+        
         key_hashed = hashlib.sha256(key) # Clave hasheada con sha256
     
         index = 32 # Primer byte de la primera clave
         indexes = [] # Guardar los indices donde se encuentran los hashes
         enviroment_number = 0
-        for i in range(1, NUMBER_KEYS + 1):
+        for i in range(1, int(total_claves_posibles) + 1):
             # Mover el cursor al indice siguiente
-            file.seek(index)
+            file.seek(index + ENVIROMENTS_SIZE)
             data = file.read(MASTER_KEY_SIZE) # Se leen 32B para descifrar la clave master
             if not data:  # Fin del archivo
                 break
@@ -472,8 +434,8 @@ def get_enviroment(path, key):
                 indexes.append(index + data.index(key_hashed.digest())) # Índice de inicio de la secuencia
                 enviroment_number = i 
             index += SHA_MASTER_KEY_SIZE # Busqueda byte a byte, no es eficiente en ficheros grandes, hay que mejorar la búsqueda
-        
-            
+        file.close()
+
     return enviroment_number
 
 def get_master_key(path, key, enviroment):
@@ -482,15 +444,11 @@ def get_master_key(path, key, enviroment):
     data = []
     
     with open(path, "r+b") as file:
-        if enviroment == 1:
-            file.seek(NONCE_SIZE+ SALT_SIZE + MASTER_KEY_SIZE)
-        elif enviroment == 2:
-            file.seek(NONCE_SIZE + SALT_SIZE + MASTER_KEY_SIZE + SHA_MASTER_KEY_SIZE)
+        file.seek((NONCE_SIZE + SALT_SIZE + ENVIROMENTS_SIZE + (SHA_MASTER_KEY_SIZE * (enviroment - 1))) + MASTER_KEY_SIZE)
         master_rec = file.read(MASTER_KEY_SIZE)
         file.close()
 
     master_rec = decrypt_message(salt, nonce, master_rec, key)
-    
 
     return master_rec
 
@@ -515,10 +473,6 @@ def get_path_files(path, key, enviroment_select, outpath):
             enviroment_cipher = block[FIRST_INDEX : ENVIROMENTS_SIZE]
             enviroment_plaintext = decrypt_message(salt, nonce, enviroment_cipher, key)
             enviroment_plaintext = int(enviroment_plaintext.decode("utf-8"))
-            # print("enviroment:")
-            # print(enviroment_plaintext)
-            # if enviroment_plaintext != enviroment_select and enviroment_plaintext != COMMON_ENVIROMENT_VALUE:
-            #     continue
             # Extraer el nombre del fichero
             filename_cipher = block[ENVIROMENTS_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE]
             filename_plaintext = decrypt_message(salt, nonce, filename_cipher, key)
@@ -531,8 +485,6 @@ def get_path_files(path, key, enviroment_select, outpath):
             total_blocks_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE + N_BLOCK_SIZE: ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE]
             total_blocks_plaintext = decrypt_message(salt, nonce, total_blocks_cipher, key)
             total_blocks_plaintext = int(total_blocks_plaintext.decode("utf-8"))
-            # print(total_blocks_plaintext)
-            # print(type(total_blocks_plaintext))
             # Extraer la metadata de la longitud de la data del mensaje en el bloque
             length_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE]
             length_plaintext = decrypt_message(salt, nonce, length_cipher, key)
@@ -552,18 +504,11 @@ def get_path_files(path, key, enviroment_select, outpath):
                         if (filename_plaintext != "random"):
                             total_files.append(filename_plaintext)
                             total_lengths.append(length_plaintext)
-                # plaintext = decrypt_message(salt, nonce, message, key)
-                # plaintext = plaintext[FIRST_INDEX:length_plaintext]
-                # total_message.append(plaintext)
             else:
-                print("CRC No Válido")
+                print("Invalid CRC")
     
-    # Para crear el fichero
-    # with open(outpath, "w+b") as file:
-    #     file.write(total_planintext)
-    # print(total_message)
     return total_files, total_lengths
-    # mount(outpath, "/mnt/ext4")
+
 def get_file(path, key, enviroment_select, outpath, root_dir):
     
     # Seleccionar la salt y el nonce del fichero
@@ -585,10 +530,6 @@ def get_file(path, key, enviroment_select, outpath, root_dir):
             enviroment_cipher = block[FIRST_INDEX : ENVIROMENTS_SIZE]
             enviroment_plaintext = decrypt_message(salt, nonce, enviroment_cipher, key)
             enviroment_plaintext = int(enviroment_plaintext.decode("utf-8"))
-            # print("enviroment:")
-            # print(enviroment_plaintext)
-            # if enviroment_plaintext != enviroment_select and enviroment_plaintext != COMMON_ENVIROMENT_VALUE:
-            #     continue
             # Extraer el nombre del fichero
             filename_cipher = block[ENVIROMENTS_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE]
             filename_plaintext = decrypt_message(salt, nonce, filename_cipher, key)
@@ -601,8 +542,6 @@ def get_file(path, key, enviroment_select, outpath, root_dir):
             total_blocks_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE + N_BLOCK_SIZE: ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE]
             total_blocks_plaintext = decrypt_message(salt, nonce, total_blocks_cipher, key)
             total_blocks_plaintext = int(total_blocks_plaintext.decode("utf-8"))
-            # print(total_blocks_plaintext)
-            # print(type(total_blocks_plaintext))
             # Extraer la metadata de la longitud de la data del mensaje en el bloque
             length_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE]
             length_plaintext = decrypt_message(salt, nonce, length_cipher, key)
@@ -616,8 +555,6 @@ def get_file(path, key, enviroment_select, outpath, root_dir):
             crc_plaintext = decrypt_message(salt, nonce, crc, key)
             crc_plaintext = int.from_bytes(crc_plaintext, byteorder='big')
             
-
-
             if enviroment_plaintext == enviroment_select or enviroment_plaintext == COMMON_ENVIROMENT_VALUE:
                 if (is_crc32_valid(message, crc_plaintext)):
                     if(outpath == filename_plaintext):
@@ -635,22 +572,11 @@ def get_file(path, key, enviroment_select, outpath, root_dir):
 
 
                 else:
-                    print("CRC No Válido")
+                    print("Invalid CRC")
     
         for message in total_message:
-            print(type(message))
             total_planintext += message
-        print(root_dir + "/" + outpath)
-        # if (root_dir[-1:] == "/" and outpath[0] != "/") or (root_dir[-1:] == "/" and outpath[:2] != "./"):
         create_file(total_planintext, root_dir + "/" + outpath)
-        # elif (root_dir[-1:] == "/" and outpath[0] == "/"):
-        #     create_file(total_planintext, root_dir + outpath[1:])
-        # elif (root_dir[-1:] == "/" and outpath[:2] == "./"):
-        #     create_file(total_planintext, root_dir + outpath[2:])
-        # elif (root_dir[-1:] != "/" and outpath[0] != "/") or (root_dir[-1:] != "/" and outpath[:2] != "./"):
-        #     create_file(total_planintext, root_dir + "/" + outpath)
-        # elif (root_dir[-1:] != "/" and outpath[] == "/"):
-        #     create_file(total_planintext, root_dir + outpath[1:])
             
     return total_planintext
 
@@ -677,10 +603,6 @@ def get_file_open(path, key, enviroment_select, outpath, root_dir):
             enviroment_cipher = block[FIRST_INDEX : ENVIROMENTS_SIZE]
             enviroment_plaintext = decrypt_message(salt, nonce, enviroment_cipher, key)
             enviroment_plaintext = int(enviroment_plaintext.decode("utf-8"))
-            # print("enviroment:")
-            # print(enviroment_plaintext)
-            # if enviroment_plaintext != enviroment_select and enviroment_plaintext != COMMON_ENVIROMENT_VALUE:
-            #     continue
             # Extraer el nombre del fichero
             filename_cipher = block[ENVIROMENTS_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE]
             filename_plaintext = decrypt_message(salt, nonce, filename_cipher, key)
@@ -693,14 +615,11 @@ def get_file_open(path, key, enviroment_select, outpath, root_dir):
             total_blocks_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE + N_BLOCK_SIZE: ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE]
             total_blocks_plaintext = decrypt_message(salt, nonce, total_blocks_cipher, key)
             total_blocks_plaintext = int(total_blocks_plaintext.decode("utf-8"))
-            # print(total_blocks_plaintext)
-            # print(type(total_blocks_plaintext))
             # Extraer la metadata de la longitud de la data del mensaje en el bloque
             length_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE]
             length_plaintext = decrypt_message(salt, nonce, length_cipher, key)
             length_plaintext = int(length_plaintext.decode("utf-8"))
 
-            
             # Extraer la data del mensaje 
             message = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE + DATA_SIZE]
             # Extraer el checksum de la data del bloque
@@ -708,8 +627,6 @@ def get_file_open(path, key, enviroment_select, outpath, root_dir):
             crc_plaintext = decrypt_message(salt, nonce, crc, key)
             crc_plaintext = int.from_bytes(crc_plaintext, byteorder='big')
             
-
-
             if enviroment_plaintext == enviroment_select or enviroment_plaintext == COMMON_ENVIROMENT_VALUE:
                 if (is_crc32_valid(message, crc_plaintext)):
                     if(outpath[1:] == filename_plaintext):
@@ -724,15 +641,11 @@ def get_file_open(path, key, enviroment_select, outpath, root_dir):
                             plaintext = decrypt_message(salt, nonce, message, key)
                             plaintext = plaintext[FIRST_INDEX:length_plaintext]
                             total_message.append(plaintext)
-
-
                 else:
-                    print("CRC No Válido")
+                    print("Invalid CRC")
     
         for message in total_message:
-            print(type(message))
             total_planintext += message
-        print(root_dir + outpath)
         create_file(total_planintext, root_dir + outpath)
     return total_planintext
 
@@ -763,30 +676,28 @@ def borrar_bytes_archivo(container_file, indexes, key, enviroment):
             # Truncar el archivo a la nueva longitud
             file.truncate(len(contenido))
 
-def search_index_filename_common_enviroment(path, key, filename, enviroment_select):
+def search_index_filename_common_enviroment(path, key, filename, enviroment_select, password):
     salt, nonce = get_salt_nonce(path)
     
     with open(path, "rb") as file:
         data = file.read()
         tamaño_bytes = len(data)
-        data_bloques = tamaño_bytes - NONCE_SIZE - SALT_SIZE - (NUMBER_KEYS * SHA_MASTER_KEY_SIZE)
-        n_bloques = int((tamaño_bytes - NONCE_SIZE - SALT_SIZE - (NUMBER_KEYS * SHA_MASTER_KEY_SIZE)) / BLOCK_SIZE)
+        get_number_keys(path, password, enviroment_select)
+        data_bloques = tamaño_bytes - NONCE_SIZE - SALT_SIZE - ENVIROMENTS_SIZE - (NUMBER_KEYS * SHA_MASTER_KEY_SIZE)
+        n_bloques = int((tamaño_bytes - NONCE_SIZE - SALT_SIZE - ENVIROMENTS_SIZE - (NUMBER_KEYS * SHA_MASTER_KEY_SIZE)) / BLOCK_SIZE)
 
 
         # Fichero completo 
         key_hashed = hashlib.sha256(key) # Clave hasheada con sha256
-        index = NONCE_SIZE + SALT_SIZE + (NUMBER_KEYS * SHA_MASTER_KEY_SIZE) # Primer byte despues de la metadata inicial
+        index = NONCE_SIZE + SALT_SIZE + ENVIROMENTS_SIZE + (NUMBER_KEYS * SHA_MASTER_KEY_SIZE) # Primer byte despues de la metadata inicial
         indexes = [] 
         for i in range(n_bloques):
-            # print("INDEX: " + str(index))
             # Mover el cursor al indice siguiente
             file.seek(index)
-            # data = file.read(KEY_HASH_SIZE) # Se leen 32B para compararlos con la clave hasheada
 
             if not data:  # Fin del archivo
                 break
             else:
-                # print(filename)
                 # Cursor en el inicio del bloque
                 file.seek(index)
                 # Lectura del bloque completo
@@ -795,15 +706,10 @@ def search_index_filename_common_enviroment(path, key, filename, enviroment_sele
                 enviroment_cipher = block[FIRST_INDEX : ENVIROMENTS_SIZE]
                 enviroment_plaintext = decrypt_message(salt, nonce, enviroment_cipher, key)
                 enviroment_plaintext = int(enviroment_plaintext.decode("utf-8"))
-                # if enviroment_plaintext != enviroment_select and enviroment_plaintext != COMMON_ENVIROMENT_VALUE:
-                #     continue
                 # Extraer el nombre del fichero
                 filename_cipher = block[ENVIROMENTS_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE]
                 filename_plaintext = decrypt_message(salt, nonce, filename_cipher, key)
                 filename_plaintext = str(filename_plaintext.decode("utf-8")).strip()
-                # print("FILENAME: " + str(filename_plaintext))
-                
-
                 # Extraer la metadata del numero de bloque
                 n_block_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE: ENVIROMENTS_SIZE + FILENAME_SIZE + N_BLOCK_SIZE]
                 n_block_plaintext = decrypt_message(salt, nonce, n_block_cipher, key)
@@ -825,7 +731,6 @@ def search_index_filename_common_enviroment(path, key, filename, enviroment_sele
                 
                 enviroment_change = COMMON_ENVIROMENT_VALUE
 
-
                 if enviroment_plaintext == enviroment_select:
                     if filename_plaintext == filename:
                         indexes.append(index) # Índice de inicio de la secuencia
@@ -844,31 +749,29 @@ def search_index_filename_common_enviroment(path, key, filename, enviroment_sele
             
     return indexes, enviroment_change
 
-def search_index_filename(path, key, filename, enviroment_select):
+def search_index_filename(path, key, filename, enviroment_select, password):
     salt, nonce = get_salt_nonce(path)
     
+    get_number_keys(path, password, enviroment_select)
     with open(path, "rb") as file:
         data = file.read()
         tamaño_bytes = len(data)
-        data_bloques = tamaño_bytes - NONCE_SIZE - SALT_SIZE - (NUMBER_KEYS * SHA_MASTER_KEY_SIZE)
-        n_bloques = int((tamaño_bytes - NONCE_SIZE - SALT_SIZE - (NUMBER_KEYS * SHA_MASTER_KEY_SIZE)) / BLOCK_SIZE)
+        data_bloques = tamaño_bytes - NONCE_SIZE - SALT_SIZE - ENVIROMENTS_SIZE - (NUMBER_KEYS * SHA_MASTER_KEY_SIZE)
+        n_bloques = int((tamaño_bytes - NONCE_SIZE - SALT_SIZE - ENVIROMENTS_SIZE - (NUMBER_KEYS * SHA_MASTER_KEY_SIZE)) / BLOCK_SIZE)
 
 
         # Fichero completo 
         key_hashed = hashlib.sha256(key) # Clave hasheada con sha256
-        index = NONCE_SIZE + SALT_SIZE + (NUMBER_KEYS * SHA_MASTER_KEY_SIZE) # Primer byte despues de la metadata inicial
+        index = NONCE_SIZE + SALT_SIZE + ENVIROMENTS_SIZE + (NUMBER_KEYS * SHA_MASTER_KEY_SIZE) # Primer byte despues de la metadata inicial
         indexes = [] 
         enviroment_return = None
         for i in range(n_bloques):
-            # print("INDEX: " + str(index))
             # Mover el cursor al indice siguiente
             file.seek(index)
-            # data = file.read(KEY_HASH_SIZE) # Se leen 32B para compararlos con la clave hasheada
 
             if not data:  # Fin del archivo
                 break
             else:
-                # print(filename)
                 # Cursor en el inicio del bloque
                 file.seek(index)
                 # Lectura del bloque completo
@@ -877,15 +780,10 @@ def search_index_filename(path, key, filename, enviroment_select):
                 enviroment_cipher = block[FIRST_INDEX : ENVIROMENTS_SIZE]
                 enviroment_plaintext = decrypt_message(salt, nonce, enviroment_cipher, key)
                 enviroment_plaintext = int(enviroment_plaintext.decode("utf-8"))
-                # if enviroment_plaintext != enviroment_select and enviroment_plaintext != COMMON_ENVIROMENT_VALUE:
-                #     continue
                 # Extraer el nombre del fichero
                 filename_cipher = block[ENVIROMENTS_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE]
                 filename_plaintext = decrypt_message(salt, nonce, filename_cipher, key)
                 filename_plaintext = str(filename_plaintext.decode("utf-8")).strip()
-                # print("FILENAME: " + str(filename_plaintext))
-                
-
                 # Extraer la metadata del numero de bloque
                 n_block_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE: ENVIROMENTS_SIZE + FILENAME_SIZE + N_BLOCK_SIZE]
                 n_block_plaintext = decrypt_message(salt, nonce, n_block_cipher, key)
@@ -917,12 +815,12 @@ def search_index_filename(path, key, filename, enviroment_select):
             
     return indexes, enviroment_return
 
-def remove_file_container_filename(container_file, key, filename, enviroment, root_mount):
+def remove_file_container_filename(container_file, key, filename, enviroment, root_mount, password):
     salt, nonce = get_salt_nonce(container_file)
     indexes = []
     enviroment_change = COMMON_ENVIROMENT_VALUE
     
-    indexes, enviroment_return = search_index_filename(container_file, key, filename, enviroment)
+    indexes, enviroment_return = search_index_filename(container_file, key, filename, enviroment, password)
 
     if not indexes:
         return False, enviroment_return
@@ -932,47 +830,41 @@ def remove_file_container_filename(container_file, key, filename, enviroment, ro
 
 
 
-def remove_file_container_filename_common_enviroment(container_file, key, filename, enviroment, root_mount):
+def remove_file_container_filename_common_enviroment(container_file, key, filename, enviroment, root_mount, password):
     salt, nonce = get_salt_nonce(container_file)
     indexes = []
     enviroment_change = COMMON_ENVIROMENT_VALUE
     
-    indexes, enviroment_change = search_index_filename_common_enviroment(container_file, key, filename, enviroment)
+    indexes, enviroment_change = search_index_filename_common_enviroment(container_file, key, filename, enviroment, password)
 
     if not indexes:
         return False
 
     elif enviroment_change != COMMON_ENVIROMENT_VALUE:
-        ### CAMBIO ENVIROMENT RUTINA TODO
 
         get_file_open(container_file, key, enviroment, filename, root_mount,)
-        # REMOVE FILE COMMON ENVIROMENT
         borrar_bytes_archivo(container_file, indexes, key, COMMON_ENVIROMENT_VALUE)
-        # ENVIROMENT CHANGE
         set_file(container_file, key, enviroment_change, filename, root_mount)
-
         open_empty_file(container_file, key, root_mount + filename)
         borrar_contenido_carpeta(root_mount)
-        print("COMMON ENVIROMENT CHANGE FILE")
 
         return True
+
     elif enviroment_change == COMMON_ENVIROMENT_VALUE: 
         borrar_bytes_archivo(container_file, indexes, key, enviroment)
+
         return True
 
 
 def open_empty_file(path, key, outpath):
     # Seleccionar la salt y el nonce del fichero
-    # if (".swp" not in outpath):
     plaintext = b" "
     create_file(plaintext, outpath)
 
 def borrar_contenido_carpeta(carpeta):
     # Verificar si la carpeta existe
     if not os.path.exists(carpeta):
-        # print(f"La carpeta '{carpeta}' no existe.")
         return
-
     try:
         # Recorrer los elementos de la carpeta
         for nombre_archivo in os.listdir(carpeta):
@@ -985,21 +877,35 @@ def borrar_contenido_carpeta(carpeta):
                 # Borrar directorio recursivamente
                 shutil.rmtree(ruta_archivo)
 
-        # print(f"El contenido de la carpeta '{carpeta}' ha sido borrado exitosamente.")
-
     except Exception as e:
-        print(f"Se produjo un error al borrar el contenido de la carpeta '{carpeta}': {str(e)}")
+        print(f"An error occurred while clearing the folder '{carpeta}': {str(e)}")
 
 
 
+# Obtener el numero de entornos/claves
+def get_number_keys(path, key, enviroment):
+    salt, nonce = get_salt_nonce(path)
+    master = get_master_key(path, key, enviroment)
+    with open(path, "rb") as file:
+        data = file.read()
+        file.seek(SALT_SIZE + NONCE_SIZE)
+        number_keys_cipher = file.read(ENVIROMENTS_SIZE)
+        number_keys_plaintext = decrypt_message(salt, nonce, number_keys_cipher, master)
+        number_keys_plaintext = int(number_keys_plaintext.decode("utf-8")) 
+        file.close()
+
+    global NUMBER_KEYS
+    NUMBER_KEYS = number_keys_plaintext
+
+# Obtener los offsets de los bloques de todos los bloques
 def search_blocks(path, enviroment, key):
 
     # Seleccionar la salt y el nonce del fichero
     salt, nonce = get_salt_nonce(path)
     with open(path, "r+b") as file:
         tamaño_bytes = len(file.read())
-        data_bloques = tamaño_bytes - NONCE_SIZE - SALT_SIZE - (NUMBER_KEYS * SHA_MASTER_KEY_SIZE)
-        n_bloques = int((tamaño_bytes - NONCE_SIZE - SALT_SIZE - (NUMBER_KEYS * SHA_MASTER_KEY_SIZE)) / BLOCK_SIZE)
+        data_bloques = tamaño_bytes - NONCE_SIZE - SALT_SIZE - ENVIROMENTS_SIZE - (NUMBER_KEYS * SHA_MASTER_KEY_SIZE)
+        n_bloques = int((tamaño_bytes - NONCE_SIZE - SALT_SIZE - ENVIROMENTS_SIZE - (NUMBER_KEYS * SHA_MASTER_KEY_SIZE)) / BLOCK_SIZE)
         first_offset = tamaño_bytes - data_bloques
         ofsets = []
         for i in range(n_bloques):
@@ -1033,89 +939,6 @@ def gen_attr_data():
         'st_uid': 0
     }
     return data
-
-
-def main():
-    print("main")
-    path = "master_prueba.bin"
-    # path = init(path) 
-    # createfile(path)
-    password = b"hola"
-    # key_hashed = hashlib.sha256(password) # Clave hasheada con sha256
-    # salt, nonce = get_salt_nonce(path)
-    # print(salt)
-    # print(binascii.hexlify(key_hashed.digest()).decode('utf-8'))
-    # search(path, password, "")
-    #### Pruebas
-    # with open(path, "r+b") as file:
-    #     tamaño_bytes = len(file.read())
-    #     # tamaño_bytes = os.path.getsize(path)
-    #     n_bloques = (tamaño_bytes - NONCE_SIZE - SALT_SIZE - (NUMBER_KEYS * MASTER_KEY_SIZE)) / BLOCK_SIZE
-    #     print(tamaño_bytes)
-    #     print(int(n_bloques))
-
-    print("Enviroment: " + str(get_enviroment(path, password)))
-    enviroment = get_enviroment(path, password)
-    master = get_master_key(path, password, enviroment)
-    print(binascii.hexlify(master).decode('utf-8'))
-    print(get_file_open(path, master, enviroment, "/bin.py", "./fuse"))
-
-    # indexes = search_index_filename(path, master, "crc32.py", enviroment)
-    # boool = remove_file_container_filename(path, master, "bin.py", enviroment)
-    # print(boool)
-
-    # print(len(indexes))
-    # print(indexes)
-    # set_file(path, master, enviroment, "./binary.py", "")
-    enviroment = 3
-    # set_file(path, master, enviroment, "./bin.py", "")
-    set_file(path, master, enviroment, "./crc32.py","")
-    files = get_path_files(path, master, enviroment, "")
-    print(files)
-    # master = master_recovery(path, password)
-    # salt = os.urandom(32)
-    # master = get_pbkdf(os.urandom(32), salt)
-    # salt, nonce = get_salt_nonce(path)
-    # print(binascii.hexlify(nonce).decode('utf-8'))
-    # print(binascii.hexlify(salt).decode('utf-8'))
-    # print(binascii.hexlify(master).decode('utf-8'))
-    # ofsets = search(path, enviroment, master)
-    # print(ofsets)
-    # # with open(path, "r+b") as file:
-    # #     file.seek(NONCE_SIZE + SALT_SIZE)
-    # #     file.write(master)
-    # #     file.close()
-
-
-
-
-
-
-
-
-
-
-    
-
-
-
-
-
-
-
-
-    
-
-
-
-
-
-
-
-if __name__ == "__main__":
-    main()
-
-
 
 
 
