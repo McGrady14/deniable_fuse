@@ -19,12 +19,11 @@ from crc32 import is_crc32_valid
 FIRST_INDEX = 0
 
 # Number of enviroments
-NUMBER_KEYS = 2
+NUMBER_KEYS = 0
 
 # Value for each enviroment
 COMMON_ENVIROMENT_VALUE = 0
-FIRST_ENVIROMENT_VALUE = 1
-SECOND_ENVIROMENT_VALUE = 2
+
 
 # Tamaño random data
 MIN_RANDOM_DATA = 1024
@@ -44,6 +43,7 @@ NONCE_SIZE = 16
 # Master key size --> Two enviroments, so 64B per container file
 MASTER_KEY_SIZE = 32
 SHA_MASTER_KEY_SIZE = MASTER_KEY_SIZE * 2
+SHA_MASTER_DECOY_KEY_SIZE = MASTER_KEY_SIZE * 3
 
 ## BLOCK SIZES 
 
@@ -180,13 +180,14 @@ def init(path):
     # Se crea el fichero 
     createfile(path)
     salt, nonce = get_salt_nonce(path)
-    master = get_pbkdf(os.urandom(32), salt)
+    master_decoy = get_pbkdf(os.urandom(32), salt)
 
     # Setear el numero de entornos
     number_enviroments = int(input("Enter the number of environments: "))
     with open(path, "r+b") as file:
         enviroments_cipher = str(number_enviroments).zfill(ENVIROMENTS_SIZE).encode("utf-8")
-        enviroments_cipher = encrypt_message_salt_nonce(enviroments_cipher, master, salt, nonce)
+        enviroments_cipher = encrypt_message_salt_nonce(enviroments_cipher, master_decoy, salt, nonce)
+        file.seek(SALT_SIZE + NONCE_SIZE)
         file.write(enviroments_cipher)
         file.close()
 
@@ -197,11 +198,14 @@ def init(path):
             key = getpass.getpass("Secret key "+ str(i + 1) + ": ")
             key = key.encode("utf8")
             key_hashed = hashlib.sha256(key) # Clave hasheada con sha256
+            master = get_pbkdf(os.urandom(32), salt)
             master_sec = encrypt_message_salt_nonce(master, key, salt, nonce)
+            master_decoy_sec = encrypt_message_salt_nonce(master_decoy, key, salt, nonce)
             file.seek(NONCE_SIZE + SALT_SIZE + ENVIROMENTS_SIZE + size_passw)
             file.write(key_hashed.digest())
             file.write(master_sec)
-            size_passw = size_passw + len(key_hashed.digest()) + len(master_sec)
+            file.write(master_decoy_sec)
+            size_passw = size_passw + len(key_hashed.digest()) + len(master_sec) + len(master_decoy_sec)
         file.close()
 
     
@@ -433,7 +437,7 @@ def get_enviroment(path, key):
             if key_hashed.digest() in data:
                 indexes.append(index + data.index(key_hashed.digest())) # Índice de inicio de la secuencia
                 enviroment_number = i 
-            index += SHA_MASTER_KEY_SIZE # Busqueda byte a byte, no es eficiente en ficheros grandes, hay que mejorar la búsqueda
+            index += SHA_MASTER_DECOY_KEY_SIZE # Busqueda byte a byte, no es eficiente en ficheros grandes, hay que mejorar la búsqueda
         file.close()
 
     return enviroment_number
@@ -444,7 +448,7 @@ def get_master_key(path, key, enviroment):
     data = []
     
     with open(path, "r+b") as file:
-        file.seek((NONCE_SIZE + SALT_SIZE + ENVIROMENTS_SIZE + (SHA_MASTER_KEY_SIZE * (enviroment - 1))) + MASTER_KEY_SIZE)
+        file.seek((NONCE_SIZE + SALT_SIZE + ENVIROMENTS_SIZE + (SHA_MASTER_DECOY_KEY_SIZE * (enviroment - 1))) + MASTER_KEY_SIZE)
         master_rec = file.read(MASTER_KEY_SIZE)
         file.close()
 
@@ -453,12 +457,26 @@ def get_master_key(path, key, enviroment):
     return master_rec
 
 
-def get_path_files(path, key, enviroment_select, outpath):
+def get_master_decoy_key(path, key, enviroment):
+    
+    salt, nonce = get_salt_nonce(path)
+    data = []
+    
+    with open(path, "r+b") as file:
+        file.seek((NONCE_SIZE + SALT_SIZE + ENVIROMENTS_SIZE + (SHA_MASTER_DECOY_KEY_SIZE * (enviroment - 1))) + SHA_MASTER_KEY_SIZE)
+        master_decoy_rec = file.read(MASTER_KEY_SIZE)
+        file.close()
+
+    master_decoy_rec = decrypt_message(salt, nonce, master_decoy_rec, key)
+
+    return master_decoy_rec
+
+def get_path_files(path, key, enviroment_select, outpath, password, master_decoy_key):
     # Seleccionar la salt y el nonce del fichero
     salt, nonce = get_salt_nonce(path)
     with open(path, "r+b") as file:
         # Se buscan las posiciones donde hay bloques 
-        indexes = search_blocks(path,enviroment_select, key)
+        indexes = search_blocks(path, enviroment_select, key, password)
         # Contenedor de todos los mensajes de los bloques con la clave indicada
         total_files = []
         total_lengths = []
@@ -469,43 +487,94 @@ def get_path_files(path, key, enviroment_select, outpath):
             file.seek(index)
             # Lectura del bloque completo
             block = file.read(BLOCK_SIZE)
-            # Enviroment
-            enviroment_cipher = block[FIRST_INDEX : ENVIROMENTS_SIZE]
-            enviroment_plaintext = decrypt_message(salt, nonce, enviroment_cipher, key)
-            enviroment_plaintext = int(enviroment_plaintext.decode("utf-8"))
-            # Extraer el nombre del fichero
-            filename_cipher = block[ENVIROMENTS_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE]
-            filename_plaintext = decrypt_message(salt, nonce, filename_cipher, key)
-            filename_plaintext = str(filename_plaintext.decode("utf-8")).strip()
-            # Extraer la metadata del numero de bloque
-            n_block_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE: ENVIROMENTS_SIZE + FILENAME_SIZE + N_BLOCK_SIZE]
-            n_block_plaintext = decrypt_message(salt, nonce, n_block_cipher, key)
-            n_block_plaintext = int(n_block_plaintext.decode("utf-8"))
-            # Extraer la metadata del total de bloques
-            total_blocks_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE + N_BLOCK_SIZE: ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE]
-            total_blocks_plaintext = decrypt_message(salt, nonce, total_blocks_cipher, key)
-            total_blocks_plaintext = int(total_blocks_plaintext.decode("utf-8"))
-            # Extraer la metadata de la longitud de la data del mensaje en el bloque
-            length_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE]
-            length_plaintext = decrypt_message(salt, nonce, length_cipher, key)
-            length_plaintext = int(length_plaintext.decode("utf-8"))
-            
-            # Extraer la data del mensaje 
-            message = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE + DATA_SIZE]
-            # Extraer el checksum de la data del bloque
-            crc = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE + DATA_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE + DATA_SIZE + CHECKSUM_SIZE]
-            crc_plaintext = decrypt_message(salt, nonce, crc, key)
-            crc_plaintext = int.from_bytes(crc_plaintext, byteorder='big')
-            
-            
-            if (is_crc32_valid(message, crc_plaintext)):
-                if total_blocks_plaintext == n_block_plaintext:
-                    if enviroment_select == enviroment_plaintext or enviroment_plaintext == COMMON_ENVIROMENT_VALUE:
-                        if (filename_plaintext != "random"):
-                            total_files.append(filename_plaintext)
-                            total_lengths.append(length_plaintext)
-            else:
-                print("Invalid CRC")
+            decoy = 2
+            try:
+                length_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE]
+                length_plaintext = decrypt_message(salt, nonce, length_cipher, key)
+                length_plaintext = int(length_plaintext.decode("utf-8"))
+                decoy = 1
+            except:
+                try:
+                    enviroment_cipher = block[FIRST_INDEX : ENVIROMENTS_SIZE]
+                    enviroment_plaintext = decrypt_message(salt, nonce, enviroment_cipher, key)
+                    enviroment_plaintext = int(enviroment_plaintext.decode("utf-8"))
+                    print(enviroment_plaintext)
+                    length_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE]
+                    length_plaintext = decrypt_message(salt, nonce, length_cipher, master_decoy_key)
+                    length_plaintext = int(length_plaintext.decode("utf-8"))
+                    decoy = 0
+                except:
+                    decoy = 2
+            if (decoy == 1):
+                # Enviroment
+                enviroment_cipher = block[FIRST_INDEX : ENVIROMENTS_SIZE]
+                enviroment_plaintext = decrypt_message(salt, nonce, enviroment_cipher, key)
+                enviroment_plaintext = int(enviroment_plaintext.decode("utf-8"))
+                # Extraer el nombre del fichero
+                filename_cipher = block[ENVIROMENTS_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE]
+                filename_plaintext = decrypt_message(salt, nonce, filename_cipher, key)
+                filename_plaintext = str(filename_plaintext.decode("utf-8")).strip()
+                # Extraer la metadata del numero de bloque
+                n_block_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE: ENVIROMENTS_SIZE + FILENAME_SIZE + N_BLOCK_SIZE]
+                n_block_plaintext = decrypt_message(salt, nonce, n_block_cipher, key)
+                n_block_plaintext = int(n_block_plaintext.decode("utf-8"))
+                # Extraer la metadata del total de bloques
+                total_blocks_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE + N_BLOCK_SIZE: ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE]
+                total_blocks_plaintext = decrypt_message(salt, nonce, total_blocks_cipher, key)
+                total_blocks_plaintext = int(total_blocks_plaintext.decode("utf-8"))
+                # Extraer la metadata de la longitud de la data del mensaje en el bloque
+                length_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE]
+                length_plaintext = decrypt_message(salt, nonce, length_cipher, key)
+                length_plaintext = int(length_plaintext.decode("utf-8"))
+                
+                # Extraer la data del mensaje 
+                message = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE + DATA_SIZE]
+                # Extraer el checksum de la data del bloque
+                crc = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE + DATA_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE + DATA_SIZE + CHECKSUM_SIZE]
+                crc_plaintext = decrypt_message(salt, nonce, crc, key)
+                crc_plaintext = int.from_bytes(crc_plaintext, byteorder='big')
+                
+            elif (decoy == 0):
+                # Enviroment
+                enviroment_cipher = block[FIRST_INDEX : ENVIROMENTS_SIZE]
+                enviroment_plaintext = decrypt_message(salt, nonce, enviroment_cipher, master_decoy_key)
+                enviroment_plaintext = int(enviroment_plaintext.decode("utf-8"))
+                # Extraer el nombre del fichero
+                filename_cipher = block[ENVIROMENTS_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE]
+                filename_plaintext = decrypt_message(salt, nonce, filename_cipher, master_decoy_key)
+                filename_plaintext = str(filename_plaintext.decode("utf-8")).strip()
+                # Extraer la metadata del numero de bloque
+                n_block_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE: ENVIROMENTS_SIZE + FILENAME_SIZE + N_BLOCK_SIZE]
+                n_block_plaintext = decrypt_message(salt, nonce, n_block_cipher, master_decoy_key)
+                n_block_plaintext = int(n_block_plaintext.decode("utf-8"))
+                # Extraer la metadata del total de bloques
+                total_blocks_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE + N_BLOCK_SIZE: ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE]
+                total_blocks_plaintext = decrypt_message(salt, nonce, total_blocks_cipher, master_decoy_key)
+                total_blocks_plaintext = int(total_blocks_plaintext.decode("utf-8"))
+                # Extraer la metadata de la longitud de la data del mensaje en el bloque
+                length_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE]
+                length_plaintext = decrypt_message(salt, nonce, length_cipher, master_decoy_key)
+                length_plaintext = int(length_plaintext.decode("utf-8"))
+                
+                # Extraer la data del mensaje 
+                message = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE + DATA_SIZE]
+                # Extraer el checksum de la data del bloque
+                crc = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE + DATA_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE + DATA_SIZE + CHECKSUM_SIZE]
+                crc_plaintext = decrypt_message(salt, nonce, crc, master_decoy_key)
+                crc_plaintext = int.from_bytes(crc_plaintext, byteorder='big')
+            else: 
+                print("DECOY")
+                decoy = 2
+                
+            if (decoy != 2):    
+                if (is_crc32_valid(message, crc_plaintext)):
+                    if total_blocks_plaintext == n_block_plaintext:
+                        if enviroment_select == enviroment_plaintext or enviroment_plaintext == COMMON_ENVIROMENT_VALUE:
+                            if (filename_plaintext != "random"):
+                                total_files.append(filename_plaintext)
+                                total_lengths.append(length_plaintext)
+                else:
+                    print("Invalid CRC")
     
     return total_files, total_lengths
 
@@ -526,53 +595,99 @@ def get_file(path, key, enviroment_select, outpath, root_dir):
             file.seek(index)
             # Lectura del bloque completo
             block = file.read(BLOCK_SIZE)
-            # Enviroment
-            enviroment_cipher = block[FIRST_INDEX : ENVIROMENTS_SIZE]
-            enviroment_plaintext = decrypt_message(salt, nonce, enviroment_cipher, key)
-            enviroment_plaintext = int(enviroment_plaintext.decode("utf-8"))
-            # Extraer el nombre del fichero
-            filename_cipher = block[ENVIROMENTS_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE]
-            filename_plaintext = decrypt_message(salt, nonce, filename_cipher, key)
-            filename_plaintext = str(filename_plaintext.decode("utf-8")).strip()
-            # Extraer la metadata del numero de bloque
-            n_block_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE: ENVIROMENTS_SIZE + FILENAME_SIZE + N_BLOCK_SIZE]
-            n_block_plaintext = decrypt_message(salt, nonce, n_block_cipher, key)
-            n_block_plaintext = int(n_block_plaintext.decode("utf-8"))
-            # Extraer la metadata del total de bloques
-            total_blocks_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE + N_BLOCK_SIZE: ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE]
-            total_blocks_plaintext = decrypt_message(salt, nonce, total_blocks_cipher, key)
-            total_blocks_plaintext = int(total_blocks_plaintext.decode("utf-8"))
-            # Extraer la metadata de la longitud de la data del mensaje en el bloque
-            length_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE]
-            length_plaintext = decrypt_message(salt, nonce, length_cipher, key)
-            length_plaintext = int(length_plaintext.decode("utf-8"))
-
+            decoy = 2
+            try:
+                length_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE]
+                length_plaintext = decrypt_message(salt, nonce, length_cipher, key)
+                length_plaintext = int(length_plaintext.decode("utf-8"))
+                decoy = 1
+            except:
+                try:
+                    length_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE]
+                    length_plaintext = decrypt_message(salt, nonce, length_cipher, master_decoy_key)
+                    length_plaintext = int(length_plaintext.decode("utf-8"))
+                    decoy = 0
+                except:
+                    decoy = 2
+            if (decoy == 1):
+                # Enviroment
+                enviroment_cipher = block[FIRST_INDEX : ENVIROMENTS_SIZE]
+                enviroment_plaintext = decrypt_message(salt, nonce, enviroment_cipher, key)
+                enviroment_plaintext = int(enviroment_plaintext.decode("utf-8"))
+                # Extraer el nombre del fichero
+                filename_cipher = block[ENVIROMENTS_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE]
+                filename_plaintext = decrypt_message(salt, nonce, filename_cipher, key)
+                filename_plaintext = str(filename_plaintext.decode("utf-8")).strip()
+                # Extraer la metadata del numero de bloque
+                n_block_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE: ENVIROMENTS_SIZE + FILENAME_SIZE + N_BLOCK_SIZE]
+                n_block_plaintext = decrypt_message(salt, nonce, n_block_cipher, key)
+                n_block_plaintext = int(n_block_plaintext.decode("utf-8"))
+                # Extraer la metadata del total de bloques
+                total_blocks_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE + N_BLOCK_SIZE: ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE]
+                total_blocks_plaintext = decrypt_message(salt, nonce, total_blocks_cipher, key)
+                total_blocks_plaintext = int(total_blocks_plaintext.decode("utf-8"))
+                # Extraer la metadata de la longitud de la data del mensaje en el bloque
+                length_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE]
+                length_plaintext = decrypt_message(salt, nonce, length_cipher, key)
+                length_plaintext = int(length_plaintext.decode("utf-8"))
+                
+                # Extraer la data del mensaje 
+                message = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE + DATA_SIZE]
+                # Extraer el checksum de la data del bloque
+                crc = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE + DATA_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE + DATA_SIZE + CHECKSUM_SIZE]
+                crc_plaintext = decrypt_message(salt, nonce, crc, key)
+                crc_plaintext = int.from_bytes(crc_plaintext, byteorder='big')
+                
+            elif (decoy == 0):
+                # Enviroment
+                enviroment_cipher = block[FIRST_INDEX : ENVIROMENTS_SIZE]
+                enviroment_plaintext = decrypt_message(salt, nonce, enviroment_cipher, master_decoy_key)
+                enviroment_plaintext = int(enviroment_plaintext.decode("utf-8"))
+                # Extraer el nombre del fichero
+                filename_cipher = block[ENVIROMENTS_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE]
+                filename_plaintext = decrypt_message(salt, nonce, filename_cipher, master_decoy_key)
+                filename_plaintext = str(filename_plaintext.decode("utf-8")).strip()
+                # Extraer la metadata del numero de bloque
+                n_block_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE: ENVIROMENTS_SIZE + FILENAME_SIZE + N_BLOCK_SIZE]
+                n_block_plaintext = decrypt_message(salt, nonce, n_block_cipher, master_decoy_key)
+                n_block_plaintext = int(n_block_plaintext.decode("utf-8"))
+                # Extraer la metadata del total de bloques
+                total_blocks_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE + N_BLOCK_SIZE: ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE]
+                total_blocks_plaintext = decrypt_message(salt, nonce, total_blocks_cipher, master_decoy_key)
+                total_blocks_plaintext = int(total_blocks_plaintext.decode("utf-8"))
+                # Extraer la metadata de la longitud de la data del mensaje en el bloque
+                length_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE]
+                length_plaintext = decrypt_message(salt, nonce, length_cipher, master_decoy_key)
+                length_plaintext = int(length_plaintext.decode("utf-8"))
+                
+                # Extraer la data del mensaje 
+                message = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE + DATA_SIZE]
+                # Extraer el checksum de la data del bloque
+                crc = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE + DATA_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE + DATA_SIZE + CHECKSUM_SIZE]
+                crc_plaintext = decrypt_message(salt, nonce, crc, master_decoy_key)
+                crc_plaintext = int.from_bytes(crc_plaintext, byteorder='big')
+            else: 
+                decoy = 2
             
-            # Extraer la data del mensaje 
-            message = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE + DATA_SIZE]
-            # Extraer el checksum de la data del bloque
-            crc = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE + DATA_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE + DATA_SIZE + CHECKSUM_SIZE]
-            crc_plaintext = decrypt_message(salt, nonce, crc, key)
-            crc_plaintext = int.from_bytes(crc_plaintext, byteorder='big')
-            
-            if enviroment_plaintext == enviroment_select or enviroment_plaintext == COMMON_ENVIROMENT_VALUE:
-                if (is_crc32_valid(message, crc_plaintext)):
-                    if(outpath == filename_plaintext):
-                        if n_block_plaintext == total_blocks_plaintext:
-                            total_files.append(filename_plaintext)
-                            plaintext = decrypt_message(salt, nonce, message, key)
-                            plaintext = plaintext[FIRST_INDEX:length_plaintext]
-                            total_message.append(plaintext)
-                            
-                            break
-                        else:
-                            plaintext = decrypt_message(salt, nonce, message, key)
-                            plaintext = plaintext[FIRST_INDEX:length_plaintext]
-                            total_message.append(plaintext)
+            if (decoy != 2):
+                if enviroment_plaintext == enviroment_select or enviroment_plaintext == COMMON_ENVIROMENT_VALUE:
+                    if (is_crc32_valid(message, crc_plaintext)):
+                        if(outpath == filename_plaintext):
+                            if n_block_plaintext == total_blocks_plaintext:
+                                total_files.append(filename_plaintext)
+                                plaintext = decrypt_message(salt, nonce, message, key)
+                                plaintext = plaintext[FIRST_INDEX:length_plaintext]
+                                total_message.append(plaintext)
+                                
+                                break
+                            else:
+                                plaintext = decrypt_message(salt, nonce, message, key)
+                                plaintext = plaintext[FIRST_INDEX:length_plaintext]
+                                total_message.append(plaintext)
 
 
-                else:
-                    print("Invalid CRC")
+                    else:
+                        print("Invalid CRC")
     
         for message in total_message:
             total_planintext += message
@@ -582,13 +697,13 @@ def get_file(path, key, enviroment_select, outpath, root_dir):
 
 
 
-def get_file_open(path, key, enviroment_select, outpath, root_dir):
+def get_file_open(path, key, enviroment_select, outpath, root_dir, password):
     
     # Seleccionar la salt y el nonce del fichero
     salt, nonce = get_salt_nonce(path)
     with open(path, "r+b") as file:
         # Se buscan las posiciones donde hay bloques 
-        indexes = search_blocks(path, enviroment_select, key)
+        indexes = search_blocks(path, enviroment_select, key, password)
         # Contenedor de todos los mensajes de los bloques con la clave indicada
         total_files = []
         total_message = []
@@ -599,50 +714,98 @@ def get_file_open(path, key, enviroment_select, outpath, root_dir):
             file.seek(index)
             # Lectura del bloque completo
             block = file.read(BLOCK_SIZE)
-            # Enviroment
-            enviroment_cipher = block[FIRST_INDEX : ENVIROMENTS_SIZE]
-            enviroment_plaintext = decrypt_message(salt, nonce, enviroment_cipher, key)
-            enviroment_plaintext = int(enviroment_plaintext.decode("utf-8"))
-            # Extraer el nombre del fichero
-            filename_cipher = block[ENVIROMENTS_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE]
-            filename_plaintext = decrypt_message(salt, nonce, filename_cipher, key)
-            filename_plaintext = str(filename_plaintext.decode("utf-8")).strip()
-            # Extraer la metadata del numero de bloque
-            n_block_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE: ENVIROMENTS_SIZE + FILENAME_SIZE + N_BLOCK_SIZE]
-            n_block_plaintext = decrypt_message(salt, nonce, n_block_cipher, key)
-            n_block_plaintext = int(n_block_plaintext.decode("utf-8"))
-            # Extraer la metadata del total de bloques
-            total_blocks_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE + N_BLOCK_SIZE: ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE]
-            total_blocks_plaintext = decrypt_message(salt, nonce, total_blocks_cipher, key)
-            total_blocks_plaintext = int(total_blocks_plaintext.decode("utf-8"))
-            # Extraer la metadata de la longitud de la data del mensaje en el bloque
-            length_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE]
-            length_plaintext = decrypt_message(salt, nonce, length_cipher, key)
-            length_plaintext = int(length_plaintext.decode("utf-8"))
 
-            # Extraer la data del mensaje 
-            message = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE + DATA_SIZE]
-            # Extraer el checksum de la data del bloque
-            crc = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE + DATA_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE + DATA_SIZE + CHECKSUM_SIZE]
-            crc_plaintext = decrypt_message(salt, nonce, crc, key)
-            crc_plaintext = int.from_bytes(crc_plaintext, byteorder='big')
-            
-            if enviroment_plaintext == enviroment_select or enviroment_plaintext == COMMON_ENVIROMENT_VALUE:
-                if (is_crc32_valid(message, crc_plaintext)):
-                    if(outpath[1:] == filename_plaintext):
-                        if n_block_plaintext == total_blocks_plaintext:
-                            total_files.append(filename_plaintext)
-                            plaintext = decrypt_message(salt, nonce, message, key)
-                            plaintext = plaintext[FIRST_INDEX:length_plaintext]
-                            total_message.append(plaintext)
-                            
-                            break
-                        else:
-                            plaintext = decrypt_message(salt, nonce, message, key)
-                            plaintext = plaintext[FIRST_INDEX:length_plaintext]
-                            total_message.append(plaintext)
-                else:
-                    print("Invalid CRC")
+            decoy = 2
+            try:
+                length_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE]
+                length_plaintext = decrypt_message(salt, nonce, length_cipher, key)
+                length_plaintext = int(length_plaintext.decode("utf-8"))
+                decoy = 1
+            except:
+                try:
+                    length_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE]
+                    length_plaintext = decrypt_message(salt, nonce, length_cipher, master_decoy_key)
+                    length_plaintext = int(length_plaintext.decode("utf-8"))
+                    decoy = 0
+                except:
+                    decoy = 2
+            if (decoy == 1):
+                # Enviroment
+                enviroment_cipher = block[FIRST_INDEX : ENVIROMENTS_SIZE]
+                enviroment_plaintext = decrypt_message(salt, nonce, enviroment_cipher, key)
+                enviroment_plaintext = int(enviroment_plaintext.decode("utf-8"))
+                # Extraer el nombre del fichero
+                filename_cipher = block[ENVIROMENTS_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE]
+                filename_plaintext = decrypt_message(salt, nonce, filename_cipher, key)
+                filename_plaintext = str(filename_plaintext.decode("utf-8")).strip()
+                # Extraer la metadata del numero de bloque
+                n_block_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE: ENVIROMENTS_SIZE + FILENAME_SIZE + N_BLOCK_SIZE]
+                n_block_plaintext = decrypt_message(salt, nonce, n_block_cipher, key)
+                n_block_plaintext = int(n_block_plaintext.decode("utf-8"))
+                # Extraer la metadata del total de bloques
+                total_blocks_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE + N_BLOCK_SIZE: ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE]
+                total_blocks_plaintext = decrypt_message(salt, nonce, total_blocks_cipher, key)
+                total_blocks_plaintext = int(total_blocks_plaintext.decode("utf-8"))
+                # Extraer la metadata de la longitud de la data del mensaje en el bloque
+                length_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE]
+                length_plaintext = decrypt_message(salt, nonce, length_cipher, key)
+                length_plaintext = int(length_plaintext.decode("utf-8"))
+                
+                # Extraer la data del mensaje 
+                message = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE + DATA_SIZE]
+                # Extraer el checksum de la data del bloque
+                crc = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE + DATA_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE + DATA_SIZE + CHECKSUM_SIZE]
+                crc_plaintext = decrypt_message(salt, nonce, crc, key)
+                crc_plaintext = int.from_bytes(crc_plaintext, byteorder='big')
+                
+            elif (decoy == 0):
+                # Enviroment
+                enviroment_cipher = block[FIRST_INDEX : ENVIROMENTS_SIZE]
+                enviroment_plaintext = decrypt_message(salt, nonce, enviroment_cipher, master_decoy_key)
+                enviroment_plaintext = int(enviroment_plaintext.decode("utf-8"))
+                # Extraer el nombre del fichero
+                filename_cipher = block[ENVIROMENTS_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE]
+                filename_plaintext = decrypt_message(salt, nonce, filename_cipher, master_decoy_key)
+                filename_plaintext = str(filename_plaintext.decode("utf-8")).strip()
+                # Extraer la metadata del numero de bloque
+                n_block_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE: ENVIROMENTS_SIZE + FILENAME_SIZE + N_BLOCK_SIZE]
+                n_block_plaintext = decrypt_message(salt, nonce, n_block_cipher, master_decoy_key)
+                n_block_plaintext = int(n_block_plaintext.decode("utf-8"))
+                # Extraer la metadata del total de bloques
+                total_blocks_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE + N_BLOCK_SIZE: ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE]
+                total_blocks_plaintext = decrypt_message(salt, nonce, total_blocks_cipher, master_decoy_key)
+                total_blocks_plaintext = int(total_blocks_plaintext.decode("utf-8"))
+                # Extraer la metadata de la longitud de la data del mensaje en el bloque
+                length_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE]
+                length_plaintext = decrypt_message(salt, nonce, length_cipher, master_decoy_key)
+                length_plaintext = int(length_plaintext.decode("utf-8"))
+                
+                # Extraer la data del mensaje 
+                message = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE + DATA_SIZE]
+                # Extraer el checksum de la data del bloque
+                crc = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE + DATA_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE + DATA_SIZE + CHECKSUM_SIZE]
+                crc_plaintext = decrypt_message(salt, nonce, crc, master_decoy_key)
+                crc_plaintext = int.from_bytes(crc_plaintext, byteorder='big')
+            else: 
+                decoy = 2
+
+            if (decoy != 2):
+                if enviroment_plaintext == enviroment_select or enviroment_plaintext == COMMON_ENVIROMENT_VALUE:
+                    if (is_crc32_valid(message, crc_plaintext)):
+                        if(outpath[1:] == filename_plaintext):
+                            if n_block_plaintext == total_blocks_plaintext:
+                                total_files.append(filename_plaintext)
+                                plaintext = decrypt_message(salt, nonce, message, key)
+                                plaintext = plaintext[FIRST_INDEX:length_plaintext]
+                                total_message.append(plaintext)
+                                
+                                break
+                            else:
+                                plaintext = decrypt_message(salt, nonce, message, key)
+                                plaintext = plaintext[FIRST_INDEX:length_plaintext]
+                                total_message.append(plaintext)
+                    else:
+                        print("Invalid CRC")
     
         for message in total_message:
             total_planintext += message
@@ -676,20 +839,20 @@ def borrar_bytes_archivo(container_file, indexes, key, enviroment):
             # Truncar el archivo a la nueva longitud
             file.truncate(len(contenido))
 
-def search_index_filename_common_enviroment(path, key, filename, enviroment_select, password):
+def search_index_filename_common_enviroment(path, key, filename, enviroment_select, password, master_decoy_key):
     salt, nonce = get_salt_nonce(path)
     
     with open(path, "rb") as file:
         data = file.read()
         tamaño_bytes = len(data)
-        get_number_keys(path, password, enviroment_select)
-        data_bloques = tamaño_bytes - NONCE_SIZE - SALT_SIZE - ENVIROMENTS_SIZE - (NUMBER_KEYS * SHA_MASTER_KEY_SIZE)
-        n_bloques = int((tamaño_bytes - NONCE_SIZE - SALT_SIZE - ENVIROMENTS_SIZE - (NUMBER_KEYS * SHA_MASTER_KEY_SIZE)) / BLOCK_SIZE)
+        get_number_keys(path, password, enviroment_select, password)
+        data_bloques = tamaño_bytes - NONCE_SIZE - SALT_SIZE - ENVIROMENTS_SIZE - (NUMBER_KEYS * SHA_MASTER_DECOY_KEY_SIZE)
+        n_bloques = int((tamaño_bytes - NONCE_SIZE - SALT_SIZE - ENVIROMENTS_SIZE - (NUMBER_KEYS * SHA_MASTER_DECOY_KEY_SIZE)) / BLOCK_SIZE)
 
 
         # Fichero completo 
         key_hashed = hashlib.sha256(key) # Clave hasheada con sha256
-        index = NONCE_SIZE + SALT_SIZE + ENVIROMENTS_SIZE + (NUMBER_KEYS * SHA_MASTER_KEY_SIZE) # Primer byte despues de la metadata inicial
+        index = NONCE_SIZE + SALT_SIZE + ENVIROMENTS_SIZE + (NUMBER_KEYS * SHA_MASTER_DECOY_KEY_SIZE) # Primer byte despues de la metadata inicial
         indexes = [] 
         for i in range(n_bloques):
             # Mover el cursor al indice siguiente
@@ -702,49 +865,98 @@ def search_index_filename_common_enviroment(path, key, filename, enviroment_sele
                 file.seek(index)
                 # Lectura del bloque completo
                 block = file.read(BLOCK_SIZE)
-                # Enviroment
-                enviroment_cipher = block[FIRST_INDEX : ENVIROMENTS_SIZE]
-                enviroment_plaintext = decrypt_message(salt, nonce, enviroment_cipher, key)
-                enviroment_plaintext = int(enviroment_plaintext.decode("utf-8"))
-                # Extraer el nombre del fichero
-                filename_cipher = block[ENVIROMENTS_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE]
-                filename_plaintext = decrypt_message(salt, nonce, filename_cipher, key)
-                filename_plaintext = str(filename_plaintext.decode("utf-8")).strip()
-                # Extraer la metadata del numero de bloque
-                n_block_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE: ENVIROMENTS_SIZE + FILENAME_SIZE + N_BLOCK_SIZE]
-                n_block_plaintext = decrypt_message(salt, nonce, n_block_cipher, key)
-                n_block_plaintext = int(n_block_plaintext.decode("utf-8"))
-                # Extraer la metadata del total de bloques
-                total_blocks_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE + N_BLOCK_SIZE: ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE]
-                total_blocks_plaintext = decrypt_message(salt, nonce, total_blocks_cipher, key)
-                total_blocks_plaintext = int(total_blocks_plaintext.decode("utf-8"))
-                # Extraer la metadata de la longitud de la data del mensaje en el bloque
-                length_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE]
-                length_plaintext = decrypt_message(salt, nonce, length_cipher, key)
-                length_plaintext = int(length_plaintext.decode("utf-8"))
-                # Extraer la data del mensaje 
-                message = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE + DATA_SIZE]
-                # Extraer el checksum de la data del bloque
-                crc = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE + DATA_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE + DATA_SIZE + CHECKSUM_SIZE]
-                crc_plaintext = decrypt_message(salt, nonce, crc, key)
-                crc_plaintext = int.from_bytes(crc_plaintext, byteorder='big')
-                
+                ## Comprobacion clave-fichero
+                decoy = 0
+                try:
+                    length_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE]
+                    length_plaintext = decrypt_message(salt, nonce, length_cipher, key)
+                    length_plaintext = int(length_plaintext.decode("utf-8"))
+                    decoy = 1
+                except:
+                    try:
+                        length_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE]
+                        length_plaintext = decrypt_message(salt, nonce, length_cipher, master_decoy_key)
+                        length_plaintext = int(length_plaintext.decode("utf-8"))
+                        decoy = 0
+                    except:
+                        decoy = 2
+                if (decoy == 1):
+                    # Enviroment
+                    enviroment_cipher = block[FIRST_INDEX : ENVIROMENTS_SIZE]
+                    enviroment_plaintext = decrypt_message(salt, nonce, enviroment_cipher, key)
+                    enviroment_plaintext = int(enviroment_plaintext.decode("utf-8"))
+                    # Extraer el nombre del fichero
+                    filename_cipher = block[ENVIROMENTS_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE]
+                    filename_plaintext = decrypt_message(salt, nonce, filename_cipher, key)
+                    filename_plaintext = str(filename_plaintext.decode("utf-8")).strip()
+                    # Extraer la metadata del numero de bloque
+                    n_block_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE: ENVIROMENTS_SIZE + FILENAME_SIZE + N_BLOCK_SIZE]
+                    n_block_plaintext = decrypt_message(salt, nonce, n_block_cipher, key)
+                    n_block_plaintext = int(n_block_plaintext.decode("utf-8"))
+                    # Extraer la metadata del total de bloques
+                    total_blocks_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE + N_BLOCK_SIZE: ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE]
+                    total_blocks_plaintext = decrypt_message(salt, nonce, total_blocks_cipher, key)
+                    total_blocks_plaintext = int(total_blocks_plaintext.decode("utf-8"))
+                    # Extraer la metadata de la longitud de la data del mensaje en el bloque
+                    length_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE]
+                    length_plaintext = decrypt_message(salt, nonce, length_cipher, key)
+                    length_plaintext = int(length_plaintext.decode("utf-8"))
+                    
+                    # Extraer la data del mensaje 
+                    message = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE + DATA_SIZE]
+                    # Extraer el checksum de la data del bloque
+                    crc = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE + DATA_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE + DATA_SIZE + CHECKSUM_SIZE]
+                    crc_plaintext = decrypt_message(salt, nonce, crc, key)
+                    crc_plaintext = int.from_bytes(crc_plaintext, byteorder='big')
+                    
+                elif (decoy == 0):
+                    # Enviroment
+                    enviroment_cipher = block[FIRST_INDEX : ENVIROMENTS_SIZE]
+                    enviroment_plaintext = decrypt_message(salt, nonce, enviroment_cipher, master_decoy_key)
+                    enviroment_plaintext = int(enviroment_plaintext.decode("utf-8"))
+                    # Extraer el nombre del fichero
+                    filename_cipher = block[ENVIROMENTS_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE]
+                    filename_plaintext = decrypt_message(salt, nonce, filename_cipher, master_decoy_key)
+                    filename_plaintext = str(filename_plaintext.decode("utf-8")).strip()
+                    # Extraer la metadata del numero de bloque
+                    n_block_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE: ENVIROMENTS_SIZE + FILENAME_SIZE + N_BLOCK_SIZE]
+                    n_block_plaintext = decrypt_message(salt, nonce, n_block_cipher, master_decoy_key)
+                    n_block_plaintext = int(n_block_plaintext.decode("utf-8"))
+                    # Extraer la metadata del total de bloques
+                    total_blocks_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE + N_BLOCK_SIZE: ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE]
+                    total_blocks_plaintext = decrypt_message(salt, nonce, total_blocks_cipher, master_decoy_key)
+                    total_blocks_plaintext = int(total_blocks_plaintext.decode("utf-8"))
+                    # Extraer la metadata de la longitud de la data del mensaje en el bloque
+                    length_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE]
+                    length_plaintext = decrypt_message(salt, nonce, length_cipher, master_decoy_key)
+                    length_plaintext = int(length_plaintext.decode("utf-8"))
+                    
+                    # Extraer la data del mensaje 
+                    message = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE + DATA_SIZE]
+                    # Extraer el checksum de la data del bloque
+                    crc = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE + DATA_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE + DATA_SIZE + CHECKSUM_SIZE]
+                    crc_plaintext = decrypt_message(salt, nonce, crc, master_decoy_key)
+                    crc_plaintext = int.from_bytes(crc_plaintext, byteorder='big')
+                else: 
+                    decoy = 2
+                    
                 enviroment_change = COMMON_ENVIROMENT_VALUE
 
-                if enviroment_plaintext == enviroment_select:
-                    if filename_plaintext == filename:
-                        indexes.append(index) # Índice de inicio de la secuencia
-                        if total_blocks_plaintext == n_block_plaintext:
-                            break
-                elif  enviroment_plaintext == COMMON_ENVIROMENT_VALUE:
-                    if filename_plaintext == filename:
-                        indexes.append(index) # Índice de inicio de la secuencia
-                        if enviroment_select == FIRST_ENVIROMENT_VALUE:
-                            enviroment_change = SECOND_ENVIROMENT_VALUE
-                        elif enviroment_select == SECOND_ENVIROMENT_VALUE:
-                            enviroment_change = FIRST_ENVIROMENT_VALUE
-                        if total_blocks_plaintext == n_block_plaintext:
-                            break
+                if (decoy != 2):
+                    if enviroment_plaintext == enviroment_select:
+                        if filename_plaintext == filename:
+                            indexes.append(index) # Índice de inicio de la secuencia
+                            if total_blocks_plaintext == n_block_plaintext:
+                                break
+                    elif  enviroment_plaintext == COMMON_ENVIROMENT_VALUE:
+                        if filename_plaintext == filename:
+                            indexes.append(index) # Índice de inicio de la secuencia
+                            if enviroment_select == FIRST_ENVIROMENT_VALUE:
+                                enviroment_change = SECOND_ENVIROMENT_VALUE
+                            elif enviroment_select == SECOND_ENVIROMENT_VALUE:
+                                enviroment_change = FIRST_ENVIROMENT_VALUE
+                            if total_blocks_plaintext == n_block_plaintext:
+                                break
             index += BLOCK_SIZE # Busqueda por cada bloque
             
     return indexes, enviroment_change
@@ -752,17 +964,17 @@ def search_index_filename_common_enviroment(path, key, filename, enviroment_sele
 def search_index_filename(path, key, filename, enviroment_select, password):
     salt, nonce = get_salt_nonce(path)
     
-    get_number_keys(path, password, enviroment_select)
+    get_number_keys(path, key, enviroment_select,password)
     with open(path, "rb") as file:
         data = file.read()
         tamaño_bytes = len(data)
-        data_bloques = tamaño_bytes - NONCE_SIZE - SALT_SIZE - ENVIROMENTS_SIZE - (NUMBER_KEYS * SHA_MASTER_KEY_SIZE)
-        n_bloques = int((tamaño_bytes - NONCE_SIZE - SALT_SIZE - ENVIROMENTS_SIZE - (NUMBER_KEYS * SHA_MASTER_KEY_SIZE)) / BLOCK_SIZE)
+        data_bloques = tamaño_bytes - NONCE_SIZE - SALT_SIZE - ENVIROMENTS_SIZE - (NUMBER_KEYS * SHA_MASTER_DECOY_KEY_SIZE)
+        n_bloques = int((tamaño_bytes - NONCE_SIZE - SALT_SIZE - ENVIROMENTS_SIZE - (NUMBER_KEYS * SHA_MASTER_DECOY_KEY_SIZE)) / BLOCK_SIZE)
 
 
         # Fichero completo 
         key_hashed = hashlib.sha256(key) # Clave hasheada con sha256
-        index = NONCE_SIZE + SALT_SIZE + ENVIROMENTS_SIZE + (NUMBER_KEYS * SHA_MASTER_KEY_SIZE) # Primer byte despues de la metadata inicial
+        index = NONCE_SIZE + SALT_SIZE + ENVIROMENTS_SIZE + (NUMBER_KEYS * SHA_MASTER_DECOY_KEY_SIZE) # Primer byte despues de la metadata inicial
         indexes = [] 
         enviroment_return = None
         for i in range(n_bloques):
@@ -776,40 +988,89 @@ def search_index_filename(path, key, filename, enviroment_select, password):
                 file.seek(index)
                 # Lectura del bloque completo
                 block = file.read(BLOCK_SIZE)
-                # Enviroment
-                enviroment_cipher = block[FIRST_INDEX : ENVIROMENTS_SIZE]
-                enviroment_plaintext = decrypt_message(salt, nonce, enviroment_cipher, key)
-                enviroment_plaintext = int(enviroment_plaintext.decode("utf-8"))
-                # Extraer el nombre del fichero
-                filename_cipher = block[ENVIROMENTS_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE]
-                filename_plaintext = decrypt_message(salt, nonce, filename_cipher, key)
-                filename_plaintext = str(filename_plaintext.decode("utf-8")).strip()
-                # Extraer la metadata del numero de bloque
-                n_block_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE: ENVIROMENTS_SIZE + FILENAME_SIZE + N_BLOCK_SIZE]
-                n_block_plaintext = decrypt_message(salt, nonce, n_block_cipher, key)
-                n_block_plaintext = int(n_block_plaintext.decode("utf-8"))
-                # Extraer la metadata del total de bloques
-                total_blocks_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE + N_BLOCK_SIZE: ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE]
-                total_blocks_plaintext = decrypt_message(salt, nonce, total_blocks_cipher, key)
-                total_blocks_plaintext = int(total_blocks_plaintext.decode("utf-8"))
-                # Extraer la metadata de la longitud de la data del mensaje en el bloque
-                length_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE]
-                length_plaintext = decrypt_message(salt, nonce, length_cipher, key)
-                length_plaintext = int(length_plaintext.decode("utf-8"))
-                # Extraer la data del mensaje 
-                message = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE + DATA_SIZE]
-                # Extraer el checksum de la data del bloque
-                crc = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE + DATA_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE + DATA_SIZE + CHECKSUM_SIZE]
-                crc_plaintext = decrypt_message(salt, nonce, crc, key)
-                crc_plaintext = int.from_bytes(crc_plaintext, byteorder='big')
+                ## Comprobacion clave-fichero
+                decoy = 0
+                try:
+                    length_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE]
+                    length_plaintext = decrypt_message(salt, nonce, length_cipher, key)
+                    length_plaintext = int(length_plaintext.decode("utf-8"))
+                    decoy = 1
+                except:
+                    try:
+                        length_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE]
+                        length_plaintext = decrypt_message(salt, nonce, length_cipher, master_decoy_key)
+                        length_plaintext = int(length_plaintext.decode("utf-8"))
+                        decoy = 0
+                    except:
+                        decoy = 2
+                if (decoy == 1):
+                    # Enviroment
+                    enviroment_cipher = block[FIRST_INDEX : ENVIROMENTS_SIZE]
+                    enviroment_plaintext = decrypt_message(salt, nonce, enviroment_cipher, key)
+                    enviroment_plaintext = int(enviroment_plaintext.decode("utf-8"))
+                    # Extraer el nombre del fichero
+                    filename_cipher = block[ENVIROMENTS_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE]
+                    filename_plaintext = decrypt_message(salt, nonce, filename_cipher, key)
+                    filename_plaintext = str(filename_plaintext.decode("utf-8")).strip()
+                    # Extraer la metadata del numero de bloque
+                    n_block_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE: ENVIROMENTS_SIZE + FILENAME_SIZE + N_BLOCK_SIZE]
+                    n_block_plaintext = decrypt_message(salt, nonce, n_block_cipher, key)
+                    n_block_plaintext = int(n_block_plaintext.decode("utf-8"))
+                    # Extraer la metadata del total de bloques
+                    total_blocks_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE + N_BLOCK_SIZE: ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE]
+                    total_blocks_plaintext = decrypt_message(salt, nonce, total_blocks_cipher, key)
+                    total_blocks_plaintext = int(total_blocks_plaintext.decode("utf-8"))
+                    # Extraer la metadata de la longitud de la data del mensaje en el bloque
+                    length_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE]
+                    length_plaintext = decrypt_message(salt, nonce, length_cipher, key)
+                    length_plaintext = int(length_plaintext.decode("utf-8"))
+                    
+                    # Extraer la data del mensaje 
+                    message = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE + DATA_SIZE]
+                    # Extraer el checksum de la data del bloque
+                    crc = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE + DATA_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE + DATA_SIZE + CHECKSUM_SIZE]
+                    crc_plaintext = decrypt_message(salt, nonce, crc, key)
+                    crc_plaintext = int.from_bytes(crc_plaintext, byteorder='big')
+                    
+                elif (decoy == 0):
+                    # Enviroment
+                    enviroment_cipher = block[FIRST_INDEX : ENVIROMENTS_SIZE]
+                    enviroment_plaintext = decrypt_message(salt, nonce, enviroment_cipher, master_decoy_key)
+                    enviroment_plaintext = int(enviroment_plaintext.decode("utf-8"))
+                    # Extraer el nombre del fichero
+                    filename_cipher = block[ENVIROMENTS_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE]
+                    filename_plaintext = decrypt_message(salt, nonce, filename_cipher, master_decoy_key)
+                    filename_plaintext = str(filename_plaintext.decode("utf-8")).strip()
+                    # Extraer la metadata del numero de bloque
+                    n_block_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE: ENVIROMENTS_SIZE + FILENAME_SIZE + N_BLOCK_SIZE]
+                    n_block_plaintext = decrypt_message(salt, nonce, n_block_cipher, master_decoy_key)
+                    n_block_plaintext = int(n_block_plaintext.decode("utf-8"))
+                    # Extraer la metadata del total de bloques
+                    total_blocks_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE + N_BLOCK_SIZE: ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE]
+                    total_blocks_plaintext = decrypt_message(salt, nonce, total_blocks_cipher, master_decoy_key)
+                    total_blocks_plaintext = int(total_blocks_plaintext.decode("utf-8"))
+                    # Extraer la metadata de la longitud de la data del mensaje en el bloque
+                    length_cipher = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE]
+                    length_plaintext = decrypt_message(salt, nonce, length_cipher, master_decoy_key)
+                    length_plaintext = int(length_plaintext.decode("utf-8"))
+                    
+                    # Extraer la data del mensaje 
+                    message = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE + DATA_SIZE]
+                    # Extraer el checksum de la data del bloque
+                    crc = block[ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE + DATA_SIZE : ENVIROMENTS_SIZE + FILENAME_SIZE +  N_BLOCK_SIZE + N_TOTAL_SIZE + N_LENGTH_SIZE + DATA_SIZE + CHECKSUM_SIZE]
+                    crc_plaintext = decrypt_message(salt, nonce, crc, master_decoy_key)
+                    crc_plaintext = int.from_bytes(crc_plaintext, byteorder='big')
+                else: 
+                    decoy = 2
 
                 enviroment_return = None
-                if enviroment_plaintext == enviroment_select or enviroment_plaintext == COMMON_ENVIROMENT_VALUE:
-                    if filename_plaintext == filename:
-                        indexes.append(index) # Índice de inicio de la secuencia
-                        if total_blocks_plaintext == n_block_plaintext:
-                            enviroment_return = enviroment_plaintext
-                            break
+                if (decoy != 2):
+                    if enviroment_plaintext == enviroment_select or enviroment_plaintext == COMMON_ENVIROMENT_VALUE:
+                        if filename_plaintext == filename:
+                            indexes.append(index) # Índice de inicio de la secuencia
+                            if total_blocks_plaintext == n_block_plaintext:
+                                enviroment_return = enviroment_plaintext
+                                break
                 
             index += BLOCK_SIZE # Busqueda por cada bloque
             
@@ -883,14 +1144,15 @@ def borrar_contenido_carpeta(carpeta):
 
 
 # Obtener el numero de entornos/claves
-def get_number_keys(path, key, enviroment):
+def get_number_keys(path, key, enviroment, password):
     salt, nonce = get_salt_nonce(path)
-    master = get_master_key(path, key, enviroment)
+    # master = get_master_key(path, key, enviroment)
+    master_decoy_key = get_master_decoy_key(path, password, enviroment)
     with open(path, "rb") as file:
         data = file.read()
         file.seek(SALT_SIZE + NONCE_SIZE)
         number_keys_cipher = file.read(ENVIROMENTS_SIZE)
-        number_keys_plaintext = decrypt_message(salt, nonce, number_keys_cipher, master)
+        number_keys_plaintext = decrypt_message(salt, nonce, number_keys_cipher, master_decoy_key)
         number_keys_plaintext = int(number_keys_plaintext.decode("utf-8")) 
         file.close()
 
@@ -898,14 +1160,15 @@ def get_number_keys(path, key, enviroment):
     NUMBER_KEYS = number_keys_plaintext
 
 # Obtener los offsets de los bloques de todos los bloques
-def search_blocks(path, enviroment, key):
+def search_blocks(path, enviroment, key, password):
 
     # Seleccionar la salt y el nonce del fichero
     salt, nonce = get_salt_nonce(path)
+    get_number_keys(path, key, enviroment, password)
     with open(path, "r+b") as file:
         tamaño_bytes = len(file.read())
-        data_bloques = tamaño_bytes - NONCE_SIZE - SALT_SIZE - ENVIROMENTS_SIZE - (NUMBER_KEYS * SHA_MASTER_KEY_SIZE)
-        n_bloques = int((tamaño_bytes - NONCE_SIZE - SALT_SIZE - ENVIROMENTS_SIZE - (NUMBER_KEYS * SHA_MASTER_KEY_SIZE)) / BLOCK_SIZE)
+        data_bloques = tamaño_bytes - NONCE_SIZE - SALT_SIZE - ENVIROMENTS_SIZE - (NUMBER_KEYS * SHA_MASTER_DECOY_KEY_SIZE)
+        n_bloques = int((tamaño_bytes - NONCE_SIZE - SALT_SIZE - ENVIROMENTS_SIZE - (NUMBER_KEYS * SHA_MASTER_DECOY_KEY_SIZE)) / BLOCK_SIZE)
         first_offset = tamaño_bytes - data_bloques
         ofsets = []
         for i in range(n_bloques):
@@ -943,4 +1206,9 @@ def gen_attr_data():
 
 
 
+# path = "./vault.bin"
+# key = "tercera".encode("utf-8")
+# enviroment = 3
 
+# print(get_enviroment(path, key))
+# get_number_keys(path, key, enviroment, key)

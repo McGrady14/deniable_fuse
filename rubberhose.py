@@ -30,6 +30,7 @@ from vol_new import remove_file_container_filename
 from vol_new import remove_file_container_filename_common_enviroment
 from vol_new import open_empty_file
 from vol_new import get_number_keys
+from vol_new import get_master_decoy_key
 
 ROOT = ""
 CONTAINER = ""
@@ -49,6 +50,7 @@ class Passthrough(Operations):
         self.files = []
         self.enviroment = get_enviroment(container_file, password)
         self.master = get_master_key(container_file, password, self.enviroment)
+        self.master_decoy = get_master_decoy_key(container_file, password, self.enviroment)
         if self.enviroment == 0:
             print("Password not matched")
             sys.exit(0)
@@ -91,7 +93,7 @@ class Passthrough(Operations):
             st = os.lstat(full_path)
             data = dict((key, getattr(st, key)) for key in ('st_atime', 'st_ctime', 'st_gid', 'st_mode', 'st_mtime', 'st_nlink', 'st_size', 'st_uid'))
         else:
-            entries, lengths = get_path_files(self.container_file, self.master, self.enviroment, self.mount_point)
+            entries, lengths = get_path_files(self.container_file, self.master, self.enviroment, self.mount_point, self.password, self.master_decoy)
             data = gen_attr_data()
             try:
                 index = entries.index(path[1:])
@@ -114,7 +116,7 @@ class Passthrough(Operations):
         print("readdir")
         dirents = ['.', '..']
 
-        entries, lengths = get_path_files(self.container_file, self.master, self.enviroment, self.mount_point)
+        entries, lengths = get_path_files(self.container_file, self.master, self.enviroment, self.mount_point, self.password, self.master_decoy)
         entries_new = []
         if (full_path.replace(self.root, "") == "/"):
             for entry in entries:
@@ -162,7 +164,7 @@ class Passthrough(Operations):
     def unlink(self, path):
         print("unlink")
         open_empty_file(self.container_file, self.master, self.root + path)
-        file_removed = remove_file_container_filename_common_enviroment(self.container_file, self.master, path[1:], self.enviroment, self.root, self.password)
+        file_removed = remove_file_container_filename_common_enviroment(self.container_file, self.master, path[1:], self.enviroment, self.root, self.password, self.master_decoy)
         return os.unlink(self._full_path(path))
 
     def symlink(self, name, target):
@@ -188,7 +190,7 @@ class Passthrough(Operations):
         full_path = self._full_path(path)
         open_empty_file(self.container_file, self.master, self.root + path)
         try:
-            outhpath = get_file_open(self.container_file, self.master, self.enviroment, path, self.root)
+            outhpath = get_file_open(self.container_file, self.master, self.enviroment, path, self.root, self.password)
         except:
             print("No outhpath")
         return os.open(full_path, flags)
@@ -334,7 +336,12 @@ def main():
             enviroment = int(args.enviroment.strip())
 
         enviroment_master = get_enviroment(args.file, key.encode("utf-8"))
-        master = get_master_key(args.file, key.encode("utf-8"), enviroment_master)
+        if (enviroment == 0):
+            master = get_master_decoy_key(args.file, key.encode("utf-8"), enviroment)
+        elif (enviroment != 0 and enviroment_master > 0):
+            master = get_master_key(args.file, key.encode("utf-8"), enviroment_master)
+        
+        
         set_file(args.file, master, enviroment, args.inputfile.strip(), "")
 
     elif args.command == 'getfile':
@@ -385,12 +392,12 @@ def main():
         KEY = key
         global MOUNTPOINT
         MOUNTPOINT = args.mountpoint.strip()
-        # Funcion para crear el 
+        # Funcion para crear el sistema de ficheros
         create_fuse_filesystem(MOUNTPOINT, ROOT, KEY, CONTAINER)
 
         
         
-    ## TODO
+    ##TOfadsDO
     elif args.command == 'random':
         
         if not args.file:
